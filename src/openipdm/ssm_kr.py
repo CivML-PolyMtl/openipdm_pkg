@@ -73,7 +73,11 @@ import pandas as pd
 import os
 from os.path import join as pjoin
 
-
+from pytagi import NetProp, TagiNetwork, Utils, Normalizer, Param
+from pytagi_util.model import HeterosMLP
+from pytagi_util.visualizer import PredictionViz
+from typing import Union, Tuple
+from sklearn.preprocessing import OneHotEncoder
 
 class SSM_KR:
     def __init__(self, fixed_seed=0, selected_cat = 0, selected_mat = 0, selected_age = 50):
@@ -111,6 +115,10 @@ class SSM_KR:
         filename = os.path.join(package_dir, 'data', 'Pretrained_SSMKR.mat')
         self.pretrained_ssm = sio.loadmat(filename)
         self.RegModel = RegressionModel()
+
+        self.BNN = pyTAGI()
+        matlab_params = os.path.join(package_dir, 'data', 'AnnParams_4atts.mat')
+        self.BNN.load_model(matlab_params)
 
         # Environment Seed
         self.fixed_seed = fixed_seed
@@ -278,8 +286,10 @@ class SSM_KR:
 
         # interventions for Beams | Front Wall | Slabs | gaurdrail  | Wing Wall | Pavement
         # Material b12 
-        material_ind = selected_mat#[8, 5, 1, 3, 6, 3]
-        self.struc_attributes = [[material_ind, selected_age, 48.7664]]  #[[material_ind[self.selected_cat], 50, 48.7664]]        # bridge attributes [Material, Age, Lattitude] b12: [[5, 50, 48.7664]] 
+        # material_ind = selected_mat#[8, 5, 1, 3, 6, 3]
+        material_ind = 3#[8, 5, 1, 3, 6, 3]
+        # self.struc_attributes = [[material_ind, selected_age, 48.7664]]  #[[material_ind[self.selected_cat], 50, 48.7664]]        # bridge attributes [Material, Age, Lattitude] b12: [[5, 50, 48.7664]] 
+        self.struc_attributes = [[material_ind, selected_age, 70]]  #[[material_ind[self.selected_cat], 50, 48.7664]]        # bridge attributes [Material, Age, Lattitude] b12: [[5, 50, 48.7664]] 
 
         # decaying  factors
         self.alpha1 = 1 # condition
@@ -318,30 +328,51 @@ class SSM_KR:
         for i in range(self.num_b):
             for j in range(self.num_c[i]):
                 for k in range(0,self.num_e[i,j,0]):
-                    Var_w0 = self.pretrained_ssm['AllElemParams'][j][3][0,0][2][0,0]
-                    init_ex = self.pretrained_ssm['AllElemParams'][j][3][0,0][0]
-                    init_var = self.pretrained_ssm['AllElemParams'][j][3][0,0][1]
-                    KernelType = self.pretrained_ssm['AllElemParams'][j][3][0,0][3]
-                    Kernel_l = self.pretrained_ssm['AllElemParams'][j][3][0,0][5][0]
-                    X_ControlPoints = self.pretrained_ssm['AllElemParams'][j][3][0,0][4]
                     sample_state = np.random.multivariate_normal(self.x_init[0,:],np.diag(self.x_init[1,:]))
                     if ~np.isnan(self.y[0][1]):
                         sample_state[0] = self.y[0][1]
                     self.struc_attributes[self.cb].append(sample_state[0])
-                    Kr = 1
-                    for im in range(len(KernelType)):
-                        Krv=self.RegModel.Kernel_Function(self.struc_attributes[self.cb][im],X_ControlPoints[:,im],Kernel_l[im],KernelType[im,0][0])
-                        Kr=np.multiply(Kr,Krv)
-                    AKr=np.divide(Kr,np.sum(Kr,1))
-                    det_speed_Ex = AKr@init_ex
-                    det_speed_Var = AKr@init_var@np.transpose(AKr) + Var_w0**2
+                    if self.BNN is None:
+                        Var_w0 = self.pretrained_ssm['AllElemParams'][j][3][0,0][2][0,0]
+                        init_ex = self.pretrained_ssm['AllElemParams'][j][3][0,0][0]
+                        init_var = self.pretrained_ssm['AllElemParams'][j][3][0,0][1]
+                        KernelType = self.pretrained_ssm['AllElemParams'][j][3][0,0][3]
+                        Kernel_l = self.pretrained_ssm['AllElemParams'][j][3][0,0][5][0]
+                        X_ControlPoints = self.pretrained_ssm['AllElemParams'][j][3][0,0][4]
+                        Kr = 1
+                        for im in range(len(KernelType)):
+                            Krv=self.RegModel.Kernel_Function(self.struc_attributes[self.cb][im],X_ControlPoints[:,im],Kernel_l[im],KernelType[im,0][0])
+                            Kr=np.multiply(Kr,Krv)
+                        AKr=np.divide(Kr,np.sum(Kr,1))
+                        det_speed_Ex = AKr@init_ex
+                        det_speed_Var = AKr@init_var@np.transpose(AKr) + Var_w0**2
+                    else:
+                        struc_atts = self.struc_attributes[self.cb]
+                        encoder = OneHotEncoder(sparse_output=False)
+                        encoder.fit(self.BNN.input_categories.reshape(-1, 1))
+                        try:
+                            x_categorical = encoder.transform(np.array(struc_atts[0]))
+                        except ValueError:
+                            x_categorical = encoder.transform(np.array(struc_atts[0]).reshape(1, -1))
+                        x_mean = self.BNN.x_mean.flatten()
+                        x_std = self.BNN.x_std.flatten()
+                        x_test = Normalizer.standardize(data=struc_atts[1:], mu=x_mean, std=x_std)
+                        x_test = np.append(x_categorical, x_test)
+                        pred_mean, pred_var = self.BNN.predict(x_test) # not using self.struc_attributes because only 4
+                        det_speed_Ex = Normalizer.unstandardize(
+                            norm_data=pred_mean,
+                            mu=self.BNN.y_mean,
+                            std=self.BNN.y_std)
+                        det_speed_Var = Normalizer.unstandardize_std(
+                            norm_std=pred_var**0.5,
+                            std=self.BNN.y_std)
                     sample_state[1] = det_speed_Ex
                     self.initial_state[i,j,k,:] = sample_state
                     self.init_var[i,j,k,0,0] = self.pretrained_ssm['AllElemParams'][j][1][0][2]**2
                     self.init_var[i,j,k,1,1] = det_speed_Var[0][0]
                     self.init_var[i,j,k,2,2] = self.pretrained_ssm['AllElemParams'][j][1][0][4]**2
                     self.init_var[i,j,k,3:6,3:6] = np.eye(3,3)
-
+              
     def initial_run(self):
         self.cs = self.initial_state
         self.e_Ex = np.concatenate([np.zeros(self.cs.shape), np.zeros(self.cs.shape)],axis = 3)
@@ -576,9 +607,7 @@ class SSM_KR:
             mu_cond = args[0]
             mu_dot, std_dot_1p, std_dot_1n, std_dot_2p, std_dot_2n = self.ST.transformed_to_original_speed(mu_cond,
                                                                                                             mu, var)
-            return mu_dot, std_dot_1p, std_dot_1n, std_dot_2p, std_dot_2n
-        
-        
+            return mu_dot, std_dot_1p, std_dot_1n, std_dot_2p, std_dot_2n  
 
     def ssm_kr_predict(self, y, total_years, inspector_std, inspector, Actions):
         num_years = len(total_years)
@@ -858,7 +887,7 @@ class SpaceTransformation:
         else:
             y = np.NaN
         return y
-    
+
 class RegressionModel:
     def __init__(self) -> None:
         pass
@@ -1049,4 +1078,87 @@ class SpaceTransformation:
         else:
             y = np.NaN
         return y
-        
+
+class tagi_Regression:
+    """Regression task using TAGI"""
+    utils: Utils = Utils()
+
+    def __init__(self,
+                 num_epochs: int,
+                 data_loader: dict,
+                 net_prop: NetProp,
+                 dtype=np.float32,
+                 viz: Union[PredictionViz, None] = None) -> None:
+        self.num_epochs = num_epochs
+        self.data_loader = data_loader
+        self.net_prop = net_prop
+        self.network = TagiNetwork(self.net_prop)
+        self.dtype = dtype
+        self.viz = viz
+
+    def train(self) -> None:
+        pass
+
+    def predict(self, X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        batch_size = 1
+        if X.ndim == 1:
+            X = X[np.newaxis, :]
+        Sx_batch, Sx_f_batch = self.init_inputs(batch_size)
+        self.network.feed_forward(X, Sx_batch, Sx_f_batch)
+        ma, Sa = self.network.get_network_predictions()
+        return ma, Sa + self.net_prop.sigma_v**2
+    
+    def init_inputs(self, batch_size: int) -> Tuple[np.ndarray, np.ndarray]:
+        """Initnitalize the covariance matrix for inputs"""
+        Sx_batch = np.zeros((batch_size, self.net_prop.nodes[0]),
+                            dtype=self.dtype)
+
+        Sx_f_batch = np.array([], dtype=self.dtype)
+        if self.net_prop.is_full_cov:
+            Sx_f_batch = self.utils.get_upper_triu_cov(
+                batch_size=batch_size,
+                num_data=self.net_prop.nodes[0],
+                sigma=self.net_prop.sigma_x)
+            Sx_batch = Sx_batch + self.net_prop.sigma_x**2
+
+        return Sx_batch, Sx_f_batch
+
+class net_architecture(HeterosMLP):
+    def __init__(self) -> None:
+        super().__init__()
+        self.num_epochs = 20
+        self.nodes = [9, 128, 2] # TODO: update based on matlab params
+
+class pyTAGI():
+    def __init__(self) -> None:
+        self.num_epochs = 20
+        self.architecture = net_architecture()
+        self.task = tagi_Regression(num_epochs=self.num_epochs,
+                          net_prop=self.architecture,
+                          data_loader=None,
+                          viz=None)
+        # super().__init__()
+
+    def train(self, X, y):
+        # self.task.train()
+        pass
+
+    def load_model(self, matlab_params):
+        matlab_model = sio.loadmat(matlab_params)
+        self.params = matlab_model['AnnModel']['theta_nn'][0,0]
+        mw = self.params[0,0]
+        Sw = self.params[1,0]
+        mb = self.params[2,0]
+        Sb = self.params[3,0]
+
+        self.params = Param(mw, Sw, mb, Sb, [], [], [], [])
+        self.task.network.set_parameters(self.params)
+        self.input_categories = matlab_model['AnnModel']['input_categories'][0,0]
+        self.x_mean = matlab_model['AnnModel']['x_mean'][0,0]
+        self.x_std = matlab_model['AnnModel']['x_std'][0,0]
+        self.y_mean = matlab_model['AnnModel']['y_mean_train'][0,0]
+        self.y_std = matlab_model['AnnModel']['y_std_train'][0,0]
+
+    def predict(self, X):
+        mean, var = self.task.predict(X)
+        return mean, var
