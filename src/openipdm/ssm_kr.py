@@ -1126,18 +1126,13 @@ class tagi_Regression:
 class net_architecture(HeterosMLP):
     def __init__(self) -> None:
         super().__init__()
-        self.num_epochs = 20
-        self.nodes = [9, 128, 2] # TODO: update based on matlab params
+        # self.num_epochs = 20
+        self.batch_size = 1
 
 class pyTAGI():
     def __init__(self) -> None:
         self.num_epochs = 20
         self.architecture = net_architecture()
-        self.task = tagi_Regression(num_epochs=self.num_epochs,
-                          net_prop=self.architecture,
-                          data_loader=None,
-                          viz=None)
-        # super().__init__()
 
     def train(self, X, y):
         # self.task.train()
@@ -1145,14 +1140,24 @@ class pyTAGI():
 
     def load_model(self, matlab_params):
         matlab_model = sio.loadmat(matlab_params)
+
+        self.architecture.nodes = matlab_model['AnnModel']['net'][0,0]['nodes'][0,0].flatten().tolist()
+        self.architecture.layers = matlab_model['AnnModel']['net'][0,0]['layer'][0,0].flatten().tolist()
+        self.architecture.activations = matlab_model['AnnModel']['net'][0,0]['actFunIdx'][0,0].flatten().tolist()
+
+        self.task = tagi_Regression(num_epochs=self.num_epochs,
+                    net_prop=self.architecture,
+                    data_loader=None,
+                    viz=None)
+        
         self.params = matlab_model['AnnModel']['theta_nn'][0,0]
         mw = self.params[0,0]
         Sw = self.params[1,0]
         mb = self.params[2,0]
         Sb = self.params[3,0]
-
         self.params = Param(mw, Sw, mb, Sb, [], [], [], [])
         self.task.network.set_parameters(self.params)
+
         self.input_categories = matlab_model['AnnModel']['input_categories'][0,0]
         self.x_mean = matlab_model['AnnModel']['x_mean'][0,0]
         self.x_std = matlab_model['AnnModel']['x_std'][0,0]
