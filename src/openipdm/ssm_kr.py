@@ -1100,10 +1100,7 @@ class tagi_Regression:
         pass
 
     def predict(self, X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        batch_size = 1
-        if X.ndim == 1:
-            X = X[np.newaxis, :]
-        Sx_batch, Sx_f_batch = self.init_inputs(batch_size)
+        Sx_batch, Sx_f_batch = self.init_inputs(batch_size = 1)
         self.network.feed_forward(X, Sx_batch, Sx_f_batch)
         ma, Sa = self.network.get_network_predictions()
         return ma, Sa + self.net_prop.sigma_v**2
@@ -1112,7 +1109,6 @@ class tagi_Regression:
         """Initnitalize the covariance matrix for inputs"""
         Sx_batch = np.zeros((batch_size, self.net_prop.nodes[0]),
                             dtype=self.dtype)
-
         Sx_f_batch = np.array([], dtype=self.dtype)
         if self.net_prop.is_full_cov:
             Sx_f_batch = self.utils.get_upper_triu_cov(
@@ -1120,19 +1116,12 @@ class tagi_Regression:
                 num_data=self.net_prop.nodes[0],
                 sigma=self.net_prop.sigma_x)
             Sx_batch = Sx_batch + self.net_prop.sigma_x**2
-
         return Sx_batch, Sx_f_batch
-
-class net_architecture(HeterosMLP):
-    def __init__(self) -> None:
-        super().__init__()
-        # self.num_epochs = 20
-        self.batch_size = 1
 
 class pyTAGI():
     def __init__(self) -> None:
         self.num_epochs = 20
-        self.architecture = net_architecture()
+        self.architecture = HeterosMLP()
 
     def train(self, X, y):
         # self.task.train()
@@ -1144,6 +1133,7 @@ class pyTAGI():
         self.architecture.nodes = matlab_model['AnnModel']['net'][0,0]['nodes'][0,0].flatten().tolist()
         self.architecture.layers = matlab_model['AnnModel']['net'][0,0]['layer'][0,0].flatten().tolist()
         self.architecture.activations = matlab_model['AnnModel']['net'][0,0]['actFunIdx'][0,0].flatten().tolist()
+        self.architecture.batch_size = 1 # assuming we are only predicting with the loaded model, not training it further
 
         self.task = tagi_Regression(num_epochs=self.num_epochs,
                     net_prop=self.architecture,
@@ -1165,5 +1155,7 @@ class pyTAGI():
         self.y_std = matlab_model['AnnModel']['y_std_train'][0,0]
 
     def predict(self, X):
+        if X.ndim == 1:
+            X = X.reshape(1, -1)
         mean, var = self.task.predict(X)
         return mean, var
