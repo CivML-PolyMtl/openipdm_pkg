@@ -175,6 +175,8 @@ class PredictionViz:
         if save_folder is None:
             plt.show()
         else:
+            if not os.path.exists(save_folder):
+                os.makedirs(save_folder)
             saving_path = os.path.join(save_folder, f"pred_{label}_{self.data_name}.png")
             plt.savefig(saving_path, bbox_inches="tight")
             plt.close()
