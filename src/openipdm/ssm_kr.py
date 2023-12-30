@@ -65,19 +65,21 @@ import math as mt
 import copy
 import scipy.linalg as sp
 import scipy.io as sio
-import scipy.stats as stats
 import scipy.special as sc
 import scipy.interpolate as interpolate
 import altair as alt
 import pandas as pd
 import os
-from os.path import join as pjoin
 
-from pytagi import NetProp, TagiNetwork, Utils, Normalizer, Param
+from pytagi import NetProp, TagiNetwork, Utils, Normalizer, Param, exponential_scheduler
 from pytagi_util.model import HeterosMLP
 from pytagi_util.visualizer import PredictionViz
+from pytagi_util.data_loader import RegressionDataLoader
+import pytagi.metric as metric
 from typing import Union, Tuple
 from sklearn.preprocessing import OneHotEncoder
+from tqdm import tqdm
+
 
 class SSM_KR:
     def __init__(self, fixed_seed=0, selected_cat = 0, selected_mat = 0, selected_age = 50):
@@ -117,8 +119,8 @@ class SSM_KR:
         self.RegModel = RegressionModel()
 
         self.BNN = pyTAGI()
-        matlab_params = os.path.join(package_dir, 'data', 'AnnParams_4atts.mat')
-        self.BNN.load_model(matlab_params)
+        # matlab_params = os.path.join(package_dir, 'data', 'AnnParams_4atts.mat')
+        # self.BNN.load_model(matlab_params)
 
         # Environment Seed
         self.fixed_seed = fixed_seed
@@ -1097,7 +1099,60 @@ class tagi_Regression:
         self.viz = viz
 
     def train(self) -> None:
-        pass
+        """Train the network using TAGI"""
+        # Inputs
+        batch_size = self.net_prop.batch_size
+        Sx_batch, Sx_f_batch = self.init_inputs(batch_size)
+
+        # Outputs
+        V_batch, ud_idx_batch = self.init_outputs(batch_size)
+        input_data = self.data_loader["train"][0]
+        output_data = self.data_loader["train"][1]
+        num_data = input_data.shape[1] * batch_size
+        num_iter = input_data.shape[1]
+        pbar = tqdm(range(self.num_epochs))
+        for epoch in pbar:
+            # Decaying observation's variance
+            self.net_prop.sigma_v = exponential_scheduler(
+                curr_v=self.net_prop.sigma_v,
+                min_v=self.net_prop.sigma_v_min,
+                decaying_factor=self.net_prop.decay_factor_sigma_v,
+                curr_iter=epoch)
+            V_batch = V_batch * 0.0 + self.net_prop.sigma_v**2
+            # shuffle data
+            idx = np.random.permutation(num_iter)
+            input_data = input_data[:, idx]
+            output_data = output_data[:, idx]
+            for i in range(num_iter):
+                # Get data
+                idx = np.random.permutation(batch_size)
+                x_batch = input_data[idx,i]
+                y_batch = output_data[idx,i]
+
+                # Feed forward
+                self.network.feed_forward(x_batch, Sx_batch, Sx_f_batch)
+
+                # Update hidden states
+                self.network.state_feed_backward(y_batch, V_batch,
+                                                 ud_idx_batch)
+
+                # Update parameters
+                self.network.param_feed_backward()
+
+                # Loss
+                norm_pred, _ = self.network.get_network_predictions()
+                pred = Normalizer.unstandardize(
+                    norm_data=norm_pred,
+                    mu=self.data_loader['y_mean'],
+                    std=self.data_loader['y_std'])
+                obs = Normalizer.unstandardize(
+                    norm_data=y_batch,
+                    mu=self.data_loader['y_mean'],
+                    std=self.data_loader['y_std'])
+                mse = metric.mse(pred, obs)
+                pbar.set_description(
+                    f"Epoch# {epoch: 0}|{i * batch_size + len(x_batch):>5}|{num_data: 1}\t mse: {mse:>7.4f}"
+                )
 
     def predict(self, X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         Sx_batch, Sx_f_batch = self.init_inputs(batch_size = 1)
@@ -1105,6 +1160,88 @@ class tagi_Regression:
         ma, Sa = self.network.get_network_predictions()
         return ma, Sa + self.net_prop.sigma_v**2
     
+    def predict_test_set(self, std_factor: int = 1) -> None:
+        """Make prediction using TAGI"""
+        # Inputs
+        batch_size = self.net_prop.batch_size
+        Sx_batch, Sx_f_batch = self.init_inputs(batch_size)
+
+        mean_predictions = []
+        variance_predictions = []
+        y_test = []
+        x_test = []
+        num_iter = self.data_loader["test"][0].shape[1]
+        for i in range(num_iter):
+            x_batch = self.data_loader["test"][0][:, i]
+            y_batch = self.data_loader["test"][1][:, i] 
+            # Predicitons
+            self.network.feed_forward(x_batch, Sx_batch, Sx_f_batch)
+            ma, Sa = self.network.get_network_predictions()
+
+            mean_predictions.append(ma)
+            variance_predictions.append(Sa + self.net_prop.sigma_v**2)
+            x_test.append(x_batch)
+            y_test.append(y_batch)
+
+        mean_predictions = np.stack(mean_predictions).flatten()
+        std_predictions = (np.stack(variance_predictions).flatten())**0.5
+        y_test = np.stack(y_test).flatten()
+        x_test = np.stack(x_test).flatten()
+
+        # Unnormalization
+        mean_predictions = Normalizer.unstandardize(
+            norm_data=mean_predictions,
+            mu=self.data_loader["y_mean"],
+            std=self.data_loader["y_std"])
+        std_predictions = Normalizer.unstandardize_std(
+            norm_std=std_predictions, std=self.data_loader["y_std"])
+
+        x_test = Normalizer.unstandardize(
+            norm_data=x_test,
+            mu=self.data_loader["x_mean"],
+            std=self.data_loader["x_std"])
+        y_test = Normalizer.unstandardize(
+            norm_data=y_test,
+            mu=self.data_loader["y_mean"],
+            std=self.data_loader["y_std"])
+        x_train = Normalizer.unstandardize(
+            norm_data=self.data_loader["train"][0].flatten(),
+            mu=self.data_loader["x_mean"],
+            std=self.data_loader["x_std"])
+        y_train = Normalizer.unstandardize(
+            norm_data=self.data_loader["train"][1].flatten(),
+            mu=self.data_loader["y_mean"],
+            std=self.data_loader["y_std"])
+        
+
+        # Compute log-likelihood
+        mse = metric.mse(mean_predictions, y_test)
+        log_lik = metric.log_likelihood(prediction=mean_predictions,
+                                        observation=y_test,
+                                        std=std_predictions)
+        
+        package_dir = os.path.dirname(__file__)
+        save_folder = os.path.join(package_dir, 'saved_results')
+
+        # Visualization
+        if self.viz is not None:
+            self.viz.plot_predictions(
+                x_train=x_train,
+                y_train=y_train,
+                x_test=x_test,
+                y_test=y_test,
+                y_pred=mean_predictions,
+                sy_pred=std_predictions,
+                std_factor=std_factor,
+                label="speed",
+                title="str att (x) vs. det speed (y)",
+                save_folder=save_folder,
+            )
+
+        print("#############")
+        print(f"MSE           : {mse: 0.2f}")
+        print(f"Log-likelihood: {log_lik: 0.2f}")
+
     def init_inputs(self, batch_size: int) -> Tuple[np.ndarray, np.ndarray]:
         """Initnitalize the covariance matrix for inputs"""
         Sx_batch = np.zeros((batch_size, self.net_prop.nodes[0]),
@@ -1116,16 +1253,53 @@ class tagi_Regression:
                 num_data=self.net_prop.nodes[0],
                 sigma=self.net_prop.sigma_x)
             Sx_batch = Sx_batch + self.net_prop.sigma_x**2
+
         return Sx_batch, Sx_f_batch
+
+    def init_outputs(self, batch_size: int) -> Tuple[np.ndarray, np.ndarray]:
+        """Initnitalize the covariance matrix for outputs"""
+        # Outputs
+        V_batch = np.zeros((batch_size, self.net_prop.nodes[-1]),
+                           dtype=self.dtype) + self.net_prop.sigma_v**2
+        ud_idx_batch = np.zeros((batch_size, 0), dtype=np.int32)
+
+        return V_batch, ud_idx_batch
 
 class pyTAGI():
     def __init__(self) -> None:
-        self.num_epochs = 20
+        self.num_epochs = 5
         self.architecture = HeterosMLP()
+        self.data_loader = {}
 
-    def train(self, X, y):
-        # self.task.train()
-        pass
+    def load_csv_data(self, data_path: str, in_dim: int, out_dim: int) -> None:
+        raw_data = np.loadtxt(data_path, delimiter=',', unpack=False)
+        data_manager = RegressionDataLoader(batch_size=self.architecture.batch_size, num_inputs=in_dim, num_outputs=in_dim)
+        # split the data into train test
+        train_data, test_data = data_manager.split_data(data = raw_data, split_ratio = 0.8)
+        x_mean, x_std = data_manager.normalizer.compute_mean_std(train_data[:,:in_dim])
+        y_mean, y_std = data_manager.normalizer.compute_mean_std(train_data[:,in_dim:])
+        # scale the data
+        x_train = data_manager.normalizer.standardize(data = train_data[:,:in_dim], mu = x_mean, std = x_std)
+        y_train = data_manager.normalizer.standardize(data = train_data[:,in_dim:], mu = y_mean, std = y_std)
+        x_test = data_manager.normalizer.standardize(data = test_data[:,:in_dim], mu = x_mean, std = x_std)
+        y_test = data_manager.normalizer.standardize(data = test_data[:,in_dim:], mu = y_mean, std = y_std)
+        # create data loaders
+        train_data_loader = data_manager.gen_data_loader(x_train, y_train)
+        test_data_loader = data_manager.gen_data_loader(x_test, y_test)
+        self.data_loader['train'] = train_data_loader
+        self.data_loader['test'] = test_data_loader
+        self.data_loader['x_mean'] = x_mean
+        self.data_loader['x_std'] = x_std
+        self.data_loader['y_mean'] = y_mean
+        self.data_loader['y_std'] = y_std
+
+    def train(self) -> None:
+        viz = PredictionViz(task_name="regression", data_name="synthetic_det_data", )
+        self.task = tagi_Regression(num_epochs=self.num_epochs,
+                    net_prop=self.architecture,
+                    data_loader=self.data_loader,
+                    viz=viz)
+        self.task.train()
 
     def load_model(self, matlab_params):
         matlab_model = sio.loadmat(matlab_params)

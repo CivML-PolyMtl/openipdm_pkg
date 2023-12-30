@@ -33,7 +33,7 @@ class HeterosMLP(NetProp):
         self.layers: list = [1, 1, 1]
         self.nodes: list = [1, 128, 2]  # output layer = [mean, std]
         self.activations: list = [0, 4, 0]
-        self.batch_size: int = 1
+        self.batch_size: int = 16
         self.sigma_v: float = 0
         self.sigma_v_min: float = 0
         self.noise_type: str = "heteros"
