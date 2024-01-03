@@ -1273,16 +1273,30 @@ class pyTAGI():
 
     def load_csv_data(self, data_path: str, in_dim: int, out_dim: int) -> None:
         raw_data = np.loadtxt(data_path, delimiter=',', unpack=False)
-        data_manager = RegressionDataLoader(batch_size=self.architecture.batch_size, num_inputs=in_dim, num_outputs=in_dim)
+        data_manager = RegressionDataLoader(batch_size=self.architecture.batch_size, num_inputs=in_dim, num_outputs=out_dim)
+        # find and one-hot encode categorical data
+        self.data_loader['categorical_idx'] = data_manager.infer_categorical_data(raw_data[:,:in_dim])
+        if np.sum(self.data_loader['categorical_idx']) != 0:
+            data_set, in_dim, self.data_loader['one_hot_encoder'] = data_manager.one_hot_encode(raw_data, in_dim, self.data_loader['categorical_idx'])
+            cat_dim = np.sum([len(i) for i in self.data_loader['one_hot_encoder'].categories_])
+        else:
+            data_set = raw_data
+            self.data_loader['one_hot_encoder'] = None
+            cat_dim = 0
         # split the data into train test
-        train_data, test_data = data_manager.split_data(data = raw_data, split_ratio = 0.8)
-        x_mean, x_std = data_manager.normalizer.compute_mean_std(train_data[:,:in_dim])
+        train_data, test_data = data_manager.split_data(data = data_set, split_ratio = 0.8)
+        x_mean, x_std = data_manager.normalizer.compute_mean_std(train_data[:,cat_dim:in_dim])
         y_mean, y_std = data_manager.normalizer.compute_mean_std(train_data[:,in_dim:])
-        # scale the data
-        x_train = data_manager.normalizer.standardize(data = train_data[:,:in_dim], mu = x_mean, std = x_std)
+
+        # scale the non-categorical data
+        x_train = data_manager.normalizer.standardize(data = train_data[:,cat_dim:in_dim], mu = x_mean, std = x_std)
         y_train = data_manager.normalizer.standardize(data = train_data[:,in_dim:], mu = y_mean, std = y_std)
-        x_test = data_manager.normalizer.standardize(data = test_data[:,:in_dim], mu = x_mean, std = x_std)
+        x_test = data_manager.normalizer.standardize(data = test_data[:,cat_dim:in_dim], mu = x_mean, std = x_std)
         y_test = data_manager.normalizer.standardize(data = test_data[:,in_dim:], mu = y_mean, std = y_std)
+
+        if cat_dim !=0:
+            x_train = np.concatenate((train_data[:,0:cat_dim], x_train), axis = 1)
+            x_test = np.concatenate((test_data[:,0:cat_dim], x_test), axis = 1)
         # create data loaders
         train_data_loader = data_manager.gen_data_loader(x_train, y_train)
         test_data_loader = data_manager.gen_data_loader(x_test, y_test)

@@ -12,6 +12,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 import pandas as pd
 from pytagi import Normalizer
+from sklearn.preprocessing import OneHotEncoder
 
 
 class DataloaderBase(ABC):
@@ -113,6 +114,29 @@ class RegressionDataLoader(DataloaderBase):
         super().__init__(batch_size)
         self.num_inputs = num_inputs
         self.num_outputs = num_outputs
+
+    def infer_categorical_data(self, data: np.ndarray) -> np.ndarray:
+        """Returns array indicating which features are categorical.. assumes array shape is num_samples * num_features"""
+        categorical_features = np.zeros(data.shape[1], dtype=bool)
+        for col_idx in range(data.shape[1]):
+            unique_vals = np.unique(data[:, col_idx], axis=0)
+            if unique_vals.shape[0] < data.shape[0] * 0.5:
+                categorical_features[col_idx] = True
+        return categorical_features
+    
+    def one_hot_encode(self, data: np.ndarray, in_dim: int, categorical_idx: np.ndarray) -> np.ndarray:
+        """Processes data to be include one-hot encoding of categorical input variables"""
+        input_data = data[:, :in_dim]
+        encoder = OneHotEncoder(sparse_output=False)
+        encoder.fit(input_data[:, categorical_idx])
+        try:
+            x_categorical = encoder.transform(np.array(input_data[:, categorical_idx]))
+        except ValueError:
+            x_categorical = encoder.transform(np.array(input_data[:, categorical_idx]).reshape(1, -1)) # in case input_data[:, categorical_idx] is one-dimensional array
+        x_continuous = input_data[:, ~categorical_idx]
+        data = np.concatenate((x_categorical, x_continuous, data[:, in_dim:]), axis=1)
+        in_dim = in_dim + x_categorical.shape[1] - categorical_idx.sum()
+        return data, in_dim, encoder
 
     def process_data(
         self, x_train_file: str, y_train_file: str, x_test_file: str, y_test_file: str
