@@ -139,6 +139,9 @@ for element in cat_list:
         inspections_with_attributes = inspections_with_attributes[~inspections_with_attributes['%C'].isnull()]
         inspections_with_attributes = inspections_with_attributes[~inspections_with_attributes['%D'].isnull()]
 
+        # change datetime to year
+        inspections_with_attributes[schema_inspections[1]] = pd.to_datetime(inspections_with_attributes[schema_inspections[1]]).dt.year
+
         if INTERVENTIONS_FLAG == 3 :
             unique_interventions = unique_interventions.drop(unique_interventions.columns[[0, 3]], axis=1)
             # pre-process activity code
