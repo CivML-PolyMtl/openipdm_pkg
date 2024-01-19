@@ -133,11 +133,6 @@ for element in cat_list:
         
         # merge structures and inspections dataframes
         inspections_with_attributes = pd.merge(inspections_elem_df, structures_df, on=schema_inspections[0], how='left')
-        # check for nan rows in the inspection data
-        inspections_with_attributes = inspections_with_attributes[~inspections_with_attributes['%A'].isnull()]
-        inspections_with_attributes = inspections_with_attributes[~inspections_with_attributes['%B'].isnull()]
-        inspections_with_attributes = inspections_with_attributes[~inspections_with_attributes['%C'].isnull()]
-        inspections_with_attributes = inspections_with_attributes[~inspections_with_attributes['%D'].isnull()]
 
         # change datetime to year
         inspections_with_attributes[schema_inspections[1]] = pd.to_datetime(inspections_with_attributes[schema_inspections[1]]).dt.year
